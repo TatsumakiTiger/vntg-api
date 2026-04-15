@@ -3,7 +3,7 @@ import requests
 import psycopg2
 import jwt as pyjwt
 from datetime import datetime, timezone, timedelta
-from flask import Flask, redirect, request, jsonify, make_response
+from flask import Flask, redirect, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -27,14 +27,13 @@ SCOPES = "identify email guilds"
 GUILD_ID = "1477669827547103365"
 VERIFIED_ROLE_ID = "1491125641226227742"
 
-SESSION_DAYS = 30  # how long the login cookie lasts
+SESSION_DAYS = 30
 
 
 # ────────────────────────────────────────────
 # JWT helpers
 # ────────────────────────────────────────────
 def create_session_token(discord_id):
-    """Create a JWT that expires in SESSION_DAYS days."""
     payload = {
         "sub": discord_id,
         "iat": datetime.now(timezone.utc),
@@ -44,7 +43,6 @@ def create_session_token(discord_id):
 
 
 def decode_session_token(token):
-    """Decode and validate a JWT. Returns discord_id or None."""
     try:
         payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload.get("sub")
@@ -52,44 +50,14 @@ def decode_session_token(token):
         return None
 
 
-def set_session_cookie(response, token):
-    """Attach the session cookie to a response."""
-    response.set_cookie(
-        "vntg_session",
-        token,
-        httponly=True,
-        secure=True,
-        samesite="None",  # required for cross-site (Railway API → vntg.com.pl)
-        max_age=SESSION_DAYS * 24 * 60 * 60,
-        path="/",
-    )
-    return response
-
-
-def clear_session_cookie(response):
-    """Remove the session cookie."""
-    response.set_cookie(
-        "vntg_session",
-        "",
-        httponly=True,
-        secure=True,
-        samesite="None",
-        max_age=0,
-        path="/",
-    )
-    return response
-
-
 # ────────────────────────────────────────────
 # Database helpers
 # ────────────────────────────────────────────
 def get_db():
-    """Return a new database connection."""
     return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
-    """Create the users table if it doesn't exist."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -111,7 +79,6 @@ def init_db():
 
 
 def upsert_user(discord_id, username, global_name, avatar, email):
-    """Insert a new user or update an existing one."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -133,7 +100,6 @@ def upsert_user(discord_id, username, global_name, avatar, email):
 
 
 def get_user(discord_id):
-    """Fetch a user row by discord_id."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -160,7 +126,6 @@ def get_user(discord_id):
 # Discord helpers
 # ────────────────────────────────────────────
 def grant_verified_role(user_id):
-    """Add the Verified role to a guild member via Bot API."""
     url = f"{DISCORD_API}/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ROLE_ID}"
     res = requests.put(
         url,
@@ -173,7 +138,6 @@ def grant_verified_role(user_id):
 
 
 def fetch_discord_user(access_token):
-    """Get the current user from Discord using their OAuth2 token."""
     res = requests.get(
         f"{DISCORD_API}/users/@me",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -208,7 +172,6 @@ def callback():
     if not code:
         return redirect(f"{FRONTEND_URL}?error=no_code")
 
-    # Exchange code for access token
     token_res = requests.post(
         f"{DISCORD_API}/oauth2/token",
         data={
@@ -227,17 +190,14 @@ def callback():
 
     access_token = token_res.json().get("access_token")
 
-    # Fetch user info from Discord
     user = fetch_discord_user(access_token)
     if not user:
         return redirect(f"{FRONTEND_URL}?error=user_fetch_failed")
 
-    # Build avatar URL
     avatar_url = None
     if user.get("avatar"):
         avatar_url = f"https://cdn.discordapp.com/avatars/{user['id']}/{user['avatar']}.png"
 
-    # Save / update user in database
     upsert_user(
         discord_id=user["id"],
         username=user["username"],
@@ -246,48 +206,31 @@ def callback():
         email=user.get("email"),
     )
 
-    # Grant Verified role on Discord server
     grant_verified_role(user["id"])
 
-    # Create JWT session token and set it as a cookie
+    # Create a JWT valid for 30 days and pass it in the URL
     session_token = create_session_token(user["id"])
-    response = make_response(redirect(f"{FRONTEND_URL}/dashboard"))
-    set_session_cookie(response, session_token)
-
-    return response
+    return redirect(f"{FRONTEND_URL}/dashboard?token={session_token}")
 
 
 @app.route("/api/me")
 def me():
-    # Read session from cookie (primary) or Authorization header (fallback)
-    token = request.cookies.get("vntg_session")
-
-    if not token:
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth.split(" ", 1)[1]
-
-    if not token:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
         return jsonify({"error": "unauthorized"}), 401
 
-    # Decode JWT to get discord_id — no Discord API call needed!
+    token = auth.split(" ", 1)[1]
+
+    # Decode our JWT — no Discord API call needed
     discord_id = decode_session_token(token)
     if not discord_id:
         return jsonify({"error": "session_expired"}), 401
 
-    # Fetch user from our database
     db_user = get_user(discord_id)
     if not db_user:
         return jsonify({"error": "user_not_found"}), 404
 
     return jsonify(db_user)
-
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-    response = make_response(jsonify({"status": "logged_out"}))
-    clear_session_cookie(response)
-    return response
 
 
 # ────────────────────────────────────────────
