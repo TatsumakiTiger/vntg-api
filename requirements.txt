@@ -3,3 +3,4 @@ gunicorn
 flask-cors
 requests
 psycopg2-binary
+PyJWT

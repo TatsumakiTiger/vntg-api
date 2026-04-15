@@ -1,8 +1,9 @@
 import os
 import requests
 import psycopg2
-from datetime import datetime, timezone
-from flask import Flask, redirect, request, jsonify
+import jwt as pyjwt
+from datetime import datetime, timezone, timedelta
+from flask import Flask, redirect, request, jsonify, make_response
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -14,6 +15,7 @@ CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET")
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+JWT_SECRET = os.environ.get("JWT_SECRET", "CHANGE-ME-set-this-in-railway")
 REDIRECT_URI = os.environ.get(
     "DISCORD_REDIRECT_URI",
     "https://vntg-api-production.up.railway.app/api/callback",
@@ -24,6 +26,58 @@ SCOPES = "identify email guilds"
 
 GUILD_ID = "1477669827547103365"
 VERIFIED_ROLE_ID = "1491125641226227742"
+
+SESSION_DAYS = 30  # how long the login cookie lasts
+
+
+# ────────────────────────────────────────────
+# JWT helpers
+# ────────────────────────────────────────────
+def create_session_token(discord_id):
+    """Create a JWT that expires in SESSION_DAYS days."""
+    payload = {
+        "sub": discord_id,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS),
+    }
+    return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def decode_session_token(token):
+    """Decode and validate a JWT. Returns discord_id or None."""
+    try:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("sub")
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return None
+
+
+def set_session_cookie(response, token):
+    """Attach the session cookie to a response."""
+    response.set_cookie(
+        "vntg_session",
+        token,
+        httponly=True,
+        secure=True,
+        samesite="None",  # required for cross-site (Railway API → vntg.com.pl)
+        max_age=SESSION_DAYS * 24 * 60 * 60,
+        path="/",
+    )
+    return response
+
+
+def clear_session_cookie(response):
+    """Remove the session cookie."""
+    response.set_cookie(
+        "vntg_session",
+        "",
+        httponly=True,
+        secure=True,
+        samesite="None",
+        max_age=0,
+        path="/",
+    )
+    return response
 
 
 # ────────────────────────────────────────────
@@ -195,29 +249,45 @@ def callback():
     # Grant Verified role on Discord server
     grant_verified_role(user["id"])
 
-    # Redirect to frontend dashboard WITH token
-    return redirect(f"{FRONTEND_URL}/dashboard?token={access_token}")
+    # Create JWT session token and set it as a cookie
+    session_token = create_session_token(user["id"])
+    response = make_response(redirect(f"{FRONTEND_URL}/dashboard"))
+    set_session_cookie(response, session_token)
+
+    return response
 
 
 @app.route("/api/me")
 def me():
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    # Read session from cookie (primary) or Authorization header (fallback)
+    token = request.cookies.get("vntg_session")
+
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth.split(" ", 1)[1]
+
+    if not token:
         return jsonify({"error": "unauthorized"}), 401
 
-    token = auth.split(" ", 1)[1]
+    # Decode JWT to get discord_id — no Discord API call needed!
+    discord_id = decode_session_token(token)
+    if not discord_id:
+        return jsonify({"error": "session_expired"}), 401
 
-    # First get discord_id from Discord API (we need it to look up our DB)
-    discord_user = fetch_discord_user(token)
-    if not discord_user:
-        return jsonify({"error": "discord_error"}), 401
-
-    # Then fetch full user data from our database
-    db_user = get_user(discord_user["id"])
+    # Fetch user from our database
+    db_user = get_user(discord_id)
     if not db_user:
         return jsonify({"error": "user_not_found"}), 404
 
     return jsonify(db_user)
+
+
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    response = make_response(jsonify({"status": "logged_out"}))
+    clear_session_cookie(response)
+    return response
 
 
 # ────────────────────────────────────────────
