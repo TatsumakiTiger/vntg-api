@@ -73,6 +73,18 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS videos (
+            video_id    TEXT PRIMARY KEY,
+            player      TEXT NOT NULL,
+            agent       TEXT NOT NULL,
+            map         TEXT NOT NULL,
+            channel     TEXT,
+            created_at  TIMESTAMP DEFAULT now()
+        )
+        """
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -120,6 +132,44 @@ def get_user(discord_id):
         "created_at": row[5].isoformat() if row[5] else None,
         "last_login": row[6].isoformat() if row[6] else None,
     }
+
+
+def get_videos(player=None, agent=None, map_name=None):
+    """Fetch videos with optional filters. Only returns complete entries."""
+    conn = get_db()
+    cur = conn.cursor()
+
+    query = "SELECT video_id, player, agent, map, channel, created_at FROM videos WHERE player IS NOT NULL AND agent IS NOT NULL AND map IS NOT NULL"
+    params = []
+
+    if player:
+        query += " AND LOWER(player) = LOWER(%s)"
+        params.append(player)
+    if agent:
+        query += " AND LOWER(agent) = LOWER(%s)"
+        params.append(agent)
+    if map_name:
+        query += " AND LOWER(map) = LOWER(%s)"
+        params.append(map_name)
+
+    query += " ORDER BY created_at DESC"
+
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return [
+        {
+            "video_id": r[0],
+            "player": r[1],
+            "agent": r[2],
+            "map": r[3],
+            "channel": r[4],
+            "created_at": r[5].isoformat() if r[5] else None,
+        }
+        for r in rows
+    ]
 
 
 # ────────────────────────────────────────────
@@ -208,7 +258,6 @@ def callback():
 
     grant_verified_role(user["id"])
 
-    # Create a JWT valid for 30 days and pass it in the URL
     session_token = create_session_token(user["id"])
     return redirect(f"{FRONTEND_URL}/dashboard?token={session_token}")
 
@@ -221,7 +270,6 @@ def me():
 
     token = auth.split(" ", 1)[1]
 
-    # Decode our JWT — no Discord API call needed
     discord_id = decode_session_token(token)
     if not discord_id:
         return jsonify({"error": "session_expired"}), 401
@@ -231,6 +279,17 @@ def me():
         return jsonify({"error": "user_not_found"}), 404
 
     return jsonify(db_user)
+
+
+@app.route("/api/videos")
+def videos():
+    """Return VODs for ProView. Supports ?player=X&agent=Y&map=Z filters."""
+    player = request.args.get("player")
+    agent = request.args.get("agent")
+    map_name = request.args.get("map")
+
+    results = get_videos(player=player, agent=agent, map_name=map_name)
+    return jsonify(results)
 
 
 # ────────────────────────────────────────────
