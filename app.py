@@ -173,6 +173,31 @@ def get_videos(player=None, agent=None, map_name=None, limit=20, offset=0):
     ]
 
 
+def count_videos(player=None, agent=None, map_name=None):
+    """Count total videos matching filters."""
+    conn = get_db()
+    cur = conn.cursor()
+
+    query = "SELECT COUNT(*) FROM videos WHERE player IS NOT NULL AND agent IS NOT NULL AND map IS NOT NULL"
+    params = []
+
+    if player:
+        query += " AND LOWER(player) = LOWER(%s)"
+        params.append(player)
+    if agent:
+        query += " AND LOWER(agent) = LOWER(%s)"
+        params.append(agent)
+    if map_name:
+        query += " AND LOWER(map) = LOWER(%s)"
+        params.append(map_name)
+
+    cur.execute(query, params)
+    total = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return total
+
+
 def get_filter_options():
     """Return distinct agents/maps/players for filter dropdowns."""
     conn = get_db()
@@ -326,6 +351,15 @@ def videos():
 def videos_filters():
     """Return distinct agents/maps/players for filter dropdowns."""
     return jsonify(get_filter_options())
+
+
+@app.route("/api/videos/count")
+def videos_count():
+    """Return total number of videos matching filters."""
+    player = request.args.get("player")
+    agent = request.args.get("agent")
+    map_name = request.args.get("map")
+    return jsonify({"total": count_videos(player=player, agent=agent, map_name=map_name)})
 
 
 # ────────────────────────────────────────────
