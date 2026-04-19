@@ -134,8 +134,8 @@ def get_user(discord_id):
     }
 
 
-def get_videos(player=None, agent=None, map_name=None):
-    """Fetch videos with optional filters. Only returns complete entries."""
+def get_videos(player=None, agent=None, map_name=None, limit=20, offset=0):
+    """Fetch videos with optional filters and pagination. Only returns complete entries."""
     conn = get_db()
     cur = conn.cursor()
 
@@ -152,7 +152,8 @@ def get_videos(player=None, agent=None, map_name=None):
         query += " AND LOWER(map) = LOWER(%s)"
         params.append(map_name)
 
-    query += " ORDER BY created_at DESC"
+    query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+    params.extend([limit, offset])
 
     cur.execute(query, params)
     rows = cur.fetchall()
@@ -170,6 +171,27 @@ def get_videos(player=None, agent=None, map_name=None):
         }
         for r in rows
     ]
+
+
+def get_filter_options():
+    """Return distinct agents/maps/players for filter dropdowns."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT agent FROM videos WHERE agent IS NOT NULL ORDER BY agent"
+    )
+    agents = [r[0] for r in cur.fetchall()]
+    cur.execute(
+        "SELECT DISTINCT map FROM videos WHERE map IS NOT NULL ORDER BY map"
+    )
+    maps = [r[0] for r in cur.fetchall()]
+    cur.execute(
+        "SELECT DISTINCT player FROM videos WHERE player IS NOT NULL ORDER BY player"
+    )
+    players = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return {"agents": agents, "maps": maps, "players": players}
 
 
 # ────────────────────────────────────────────
@@ -283,13 +305,27 @@ def me():
 
 @app.route("/api/videos")
 def videos():
-    """Return VODs for ProView. Supports ?player=X&agent=Y&map=Z filters."""
+    """Return VODs for ProView. Supports ?player=X&agent=Y&map=Z&limit=N&offset=N."""
     player = request.args.get("player")
     agent = request.args.get("agent")
     map_name = request.args.get("map")
 
-    results = get_videos(player=player, agent=agent, map_name=map_name)
+    try:
+        limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except ValueError:
+        limit, offset = 20, 0
+
+    results = get_videos(
+        player=player, agent=agent, map_name=map_name, limit=limit, offset=offset
+    )
     return jsonify(results)
+
+
+@app.route("/api/videos/filters")
+def videos_filters():
+    """Return distinct agents/maps/players for filter dropdowns."""
+    return jsonify(get_filter_options())
 
 
 # ────────────────────────────────────────────
