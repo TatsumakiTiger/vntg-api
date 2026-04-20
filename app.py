@@ -234,6 +234,16 @@ def grant_verified_role(user_id):
     return res.status_code in (200, 204)
 
 
+def member_has_role(user_id):
+    """Return True if the user is in the guild AND already has the verified role."""
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/members/{user_id}"
+    res = requests.get(url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
+    if res.status_code != 200:
+        return False
+    roles = res.json().get("roles", [])
+    return VERIFIED_ROLE_ID in roles
+
+
 def fetch_discord_user(access_token):
     res = requests.get(
         f"{DISCORD_API}/users/@me",
@@ -324,6 +334,11 @@ def me():
     db_user = get_user(discord_id)
     if not db_user:
         return jsonify({"error": "user_not_found"}), 404
+
+    # Safety net: if user joined the guild after logging in on site,
+    # make sure they have the verified role. Cheap no-op if already granted.
+    if BOT_TOKEN and not member_has_role(discord_id):
+        grant_verified_role(discord_id)
 
     return jsonify(db_user)
 

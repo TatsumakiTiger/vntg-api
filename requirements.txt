@@ -4,3 +4,4 @@ flask-cors
 requests
 psycopg2-binary
 PyJWT
+discord.py
