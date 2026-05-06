@@ -63,16 +63,29 @@ def init_db():
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
-            discord_id  TEXT PRIMARY KEY,
-            username    TEXT,
-            global_name TEXT,
-            avatar      TEXT,
-            email       TEXT,
-            created_at  TIMESTAMP DEFAULT now(),
-            last_login  TIMESTAMP DEFAULT now()
+            discord_id          TEXT PRIMARY KEY,
+            username            TEXT,
+            global_name         TEXT,
+            avatar              TEXT,
+            email               TEXT,
+            vantage_nick        TEXT UNIQUE,
+            custom_avatar       TEXT,
+            onboarding_complete BOOLEAN DEFAULT false,
+            created_at          TIMESTAMP DEFAULT now(),
+            last_login          TIMESTAMP DEFAULT now()
         )
         """
     )
+    # Migrate existing tables that lack new columns
+    for col, typedef in [
+        ("vantage_nick", "TEXT UNIQUE"),
+        ("custom_avatar", "TEXT"),
+        ("onboarding_complete", "BOOLEAN DEFAULT false"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+        except Exception:
+            conn.rollback()
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS videos (
@@ -115,7 +128,7 @@ def get_user(discord_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login FROM users WHERE discord_id = %s",
+        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete FROM users WHERE discord_id = %s",
         (discord_id,),
     )
     row = cur.fetchone()
@@ -131,6 +144,9 @@ def get_user(discord_id):
         "email": row[4],
         "created_at": row[5].isoformat() if row[5] else None,
         "last_login": row[6].isoformat() if row[6] else None,
+        "vantage_nick": row[7],
+        "custom_avatar": row[8],
+        "onboarding_complete": bool(row[9]) if row[9] is not None else False,
     }
 
 
@@ -316,7 +332,7 @@ def callback():
     grant_verified_role(user["id"])
 
     session_token = create_session_token(user["id"])
-    return redirect(f"{FRONTEND_URL}/dashboard?token={session_token}")
+    return redirect(f"{FRONTEND_URL}/?token={session_token}")
 
 
 @app.route("/api/me")
@@ -375,6 +391,102 @@ def videos_count():
     agent = request.args.get("agent")
     map_name = request.args.get("map")
     return jsonify({"total": count_videos(player=player, agent=agent, map_name=map_name)})
+
+
+# ────────────────────────────────────────────
+# Onboarding
+# ────────────────────────────────────────────
+def _get_authed_user():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None, (jsonify({"error": "unauthorized"}), 401)
+    discord_id = decode_session_token(auth.split(" ", 1)[1])
+    if not discord_id:
+        return None, (jsonify({"error": "session_expired"}), 401)
+    return discord_id, None
+
+
+import re
+
+NICK_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
+
+
+@app.route("/api/check-nick/<nick>")
+def check_nick(nick):
+    if not NICK_RE.match(nick):
+        return jsonify({"available": False, "reason": "Invalid format. 3-20 chars, letters/numbers/underscore only."})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE LOWER(vantage_nick) = LOWER(%s)", (nick,))
+    taken = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    if taken:
+        return jsonify({"available": False, "reason": "This nick is already taken."})
+    return jsonify({"available": True})
+
+
+@app.route("/api/onboarding/nick", methods=["POST"])
+def set_nick():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    nick = (data.get("nick") or "").strip()
+    if not NICK_RE.match(nick):
+        return jsonify({"error": "Invalid nick. 3-20 chars, letters/numbers/underscore only."}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE LOWER(vantage_nick) = LOWER(%s) AND discord_id != %s", (nick, discord_id))
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Nick already taken."}), 409
+    cur.execute("UPDATE users SET vantage_nick = %s WHERE discord_id = %s", (nick, discord_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True, "nick": nick})
+
+
+@app.route("/api/onboarding/avatar", methods=["POST"])
+def set_avatar():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    avatar_data = data.get("avatar")
+    if not avatar_data:
+        return jsonify({"error": "No avatar provided."}), 400
+    if len(avatar_data) > 500_000:
+        return jsonify({"error": "Avatar too large (max ~350KB)."}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET custom_avatar = %s WHERE discord_id = %s", (avatar_data, discord_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/onboarding/complete", methods=["POST"])
+def complete_onboarding():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT vantage_nick FROM users WHERE discord_id = %s", (discord_id,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Set a nick first."}), 400
+    cur.execute("UPDATE users SET onboarding_complete = true WHERE discord_id = %s", (discord_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True})
 
 
 # ────────────────────────────────────────────
