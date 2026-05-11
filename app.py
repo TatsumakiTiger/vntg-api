@@ -82,6 +82,9 @@ def init_db():
         ("custom_avatar", "TEXT"),
         ("onboarding_complete", "BOOLEAN DEFAULT false"),
         ("subscribed_agent", "TEXT"),
+        ("streak", "INTEGER DEFAULT 0"),
+        ("last_seen_date", "DATE"),
+        ("daily_log", "TEXT[] DEFAULT '{}'"),
     ]:
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
@@ -129,7 +132,7 @@ def get_user(discord_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete, subscribed_agent FROM users WHERE discord_id = %s",
+        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete, subscribed_agent, streak, last_seen_date, daily_log FROM users WHERE discord_id = %s",
         (discord_id,),
     )
     row = cur.fetchone()
@@ -149,7 +152,47 @@ def get_user(discord_id):
         "custom_avatar": row[8],
         "onboarding_complete": bool(row[9]) if row[9] is not None else False,
         "subscribed_agent": row[10],
+        "streak": row[11] or 0,
+        "last_seen_date": row[12].isoformat() if row[12] else None,
+        "daily_log": list(row[13]) if row[13] else [],
     }
+
+
+def update_streak(discord_id):
+    from datetime import date, timedelta
+    today = date.today()
+    today_str = today.isoformat()
+    yesterday_str = (today - timedelta(days=1)).isoformat()
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT streak, last_seen_date, daily_log FROM users WHERE discord_id = %s",
+        (discord_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close(); return
+
+    current_streak, last_seen, daily_log = row
+    current_streak = current_streak or 0
+    daily_log = list(daily_log) if daily_log else []
+
+    if last_seen and last_seen.isoformat() == today_str:
+        cur.close(); conn.close(); return
+
+    new_streak = (current_streak + 1) if (last_seen and last_seen.isoformat() == yesterday_str) else 1
+
+    if today_str not in daily_log:
+        daily_log.append(today_str)
+
+    cur.execute(
+        "UPDATE users SET streak = %s, last_seen_date = %s, daily_log = %s WHERE discord_id = %s",
+        (new_streak, today_str, daily_log, discord_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def get_videos(player=None, agent=None, map_name=None, limit=20, offset=0):
@@ -348,6 +391,8 @@ def me():
     discord_id = decode_session_token(token)
     if not discord_id:
         return jsonify({"error": "session_expired"}), 401
+
+    update_streak(discord_id)
 
     db_user = get_user(discord_id)
     if not db_user:
