@@ -186,6 +186,23 @@ def update_streak(discord_id):
     xp_log = list(xp_log) if xp_log else []
 
     if last_seen and last_seen.isoformat() == today_str:
+        # Already counted today — if xp_log is empty, award XP retroactively (one-time migration)
+        if not xp_log:
+            xp_gained = 10 + current_streak
+            multiplier = round(1 + current_streak * 0.1, 2)
+            new_xp = current_xp + xp_gained
+            xp_log.append({
+                "date": today_str,
+                "reason": "Streak Day",
+                "streak": current_streak,
+                "multiplier": multiplier,
+                "xp": xp_gained,
+            })
+            cur.execute(
+                "UPDATE users SET xp = %s, xp_log = %s WHERE discord_id = %s",
+                (new_xp, json.dumps(xp_log), discord_id),
+            )
+            conn.commit()
         cur.close(); conn.close(); return
 
     new_streak = (current_streak + 1) if (last_seen and last_seen.isoformat() == yesterday_str) else 1
@@ -613,6 +630,41 @@ def delete_subscription():
     cur.close()
     conn.close()
     return jsonify({"ok": True, "subscribed_agent": None})
+
+
+# ────────────────────────────────────────────
+# Leaderboard
+# ────────────────────────────────────────────
+@app.route("/api/leaderboard")
+def leaderboard():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT discord_id, vantage_nick, global_name, username, custom_avatar, avatar, xp, streak
+        FROM users
+        WHERE onboarding_complete = true
+        ORDER BY xp DESC, streak DESC, created_at ASC
+        LIMIT 10
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([
+        {
+            "rank": i + 1,
+            "discord_id": r[0],
+            "nick": r[1] or r[2] or r[3],
+            "avatar": r[4] or r[5],
+            "xp": r[6] or 0,
+            "streak": r[7] or 0,
+        }
+        for i, r in enumerate(rows)
+    ])
 
 
 # ────────────────────────────────────────────
