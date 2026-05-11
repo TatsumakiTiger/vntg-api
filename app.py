@@ -81,6 +81,7 @@ def init_db():
         ("vantage_nick", "TEXT UNIQUE"),
         ("custom_avatar", "TEXT"),
         ("onboarding_complete", "BOOLEAN DEFAULT false"),
+        ("subscribed_agent", "TEXT"),
     ]:
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
@@ -128,7 +129,7 @@ def get_user(discord_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete FROM users WHERE discord_id = %s",
+        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete, subscribed_agent FROM users WHERE discord_id = %s",
         (discord_id,),
     )
     row = cur.fetchone()
@@ -147,6 +148,7 @@ def get_user(discord_id):
         "vantage_nick": row[7],
         "custom_avatar": row[8],
         "onboarding_complete": bool(row[9]) if row[9] is not None else False,
+        "subscribed_agent": row[10],
     }
 
 
@@ -487,6 +489,64 @@ def complete_onboarding():
     cur.close()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ────────────────────────────────────────────
+# Subscription
+# ────────────────────────────────────────────
+VALID_AGENTS = [
+    "Jett", "Reyna", "Raze", "Phoenix", "Neon", "Yoru", "Iso",
+    "Sage", "Skye", "Killjoy", "Cypher", "Chamber", "Deadlock",
+    "Gekko", "Fade", "Sova", "Breach", "KAYO", "Tejo",
+    "Omen", "Brimstone", "Viper", "Astra", "Harbor", "Clove", "Miks",
+    "Vyse", "Waylay", "Veto",
+]
+
+
+@app.route("/api/me/subscription", methods=["GET"])
+def get_subscription():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT subscribed_agent FROM users WHERE discord_id = %s", (discord_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return jsonify({"subscribed_agent": row[0] if row else None})
+
+
+@app.route("/api/me/subscription", methods=["POST"])
+def set_subscription():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    agent = (data.get("agent") or "").strip()
+    if agent not in VALID_AGENTS:
+        return jsonify({"error": f"Invalid agent. Choose from: {', '.join(VALID_AGENTS)}"}), 400
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET subscribed_agent = %s WHERE discord_id = %s", (agent, discord_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True, "subscribed_agent": agent})
+
+
+@app.route("/api/me/subscription", methods=["DELETE"])
+def delete_subscription():
+    discord_id, err = _get_authed_user()
+    if err:
+        return err
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET subscribed_agent = NULL WHERE discord_id = %s", (discord_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True, "subscribed_agent": None})
 
 
 # ────────────────────────────────────────────
