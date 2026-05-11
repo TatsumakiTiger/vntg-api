@@ -85,6 +85,7 @@ def init_db():
         ("streak", "INTEGER DEFAULT 0"),
         ("last_seen_date", "DATE"),
         ("daily_log", "TEXT[] DEFAULT '{}'"),
+        ("xp", "INTEGER DEFAULT 0"),
     ]:
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
@@ -132,7 +133,7 @@ def get_user(discord_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete, subscribed_agent, streak, last_seen_date, daily_log FROM users WHERE discord_id = %s",
+        "SELECT discord_id, username, global_name, avatar, email, created_at, last_login, vantage_nick, custom_avatar, onboarding_complete, subscribed_agent, streak, last_seen_date, daily_log, xp FROM users WHERE discord_id = %s",
         (discord_id,),
     )
     row = cur.fetchone()
@@ -155,6 +156,7 @@ def get_user(discord_id):
         "streak": row[11] or 0,
         "last_seen_date": row[12].isoformat() if row[12] else None,
         "daily_log": list(row[13]) if row[13] else [],
+        "xp": row[14] or 0,
     }
 
 
@@ -167,16 +169,17 @@ def update_streak(discord_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT streak, last_seen_date, daily_log FROM users WHERE discord_id = %s",
+        "SELECT streak, last_seen_date, daily_log, xp FROM users WHERE discord_id = %s",
         (discord_id,),
     )
     row = cur.fetchone()
     if not row:
         cur.close(); conn.close(); return
 
-    current_streak, last_seen, daily_log = row
+    current_streak, last_seen, daily_log, current_xp = row
     current_streak = current_streak or 0
     daily_log = list(daily_log) if daily_log else []
+    current_xp = current_xp or 0
 
     if last_seen and last_seen.isoformat() == today_str:
         cur.close(); conn.close(); return
@@ -186,9 +189,14 @@ def update_streak(discord_id):
     if today_str not in daily_log:
         daily_log.append(today_str)
 
+    # +10 XP per day, capped at level 5 max (700 total XP)
+    XP_PER_DAY = 10
+    XP_CAP = 700
+    new_xp = min(current_xp + XP_PER_DAY, XP_CAP)
+
     cur.execute(
-        "UPDATE users SET streak = %s, last_seen_date = %s, daily_log = %s WHERE discord_id = %s",
-        (new_streak, today_str, daily_log, discord_id),
+        "UPDATE users SET streak = %s, last_seen_date = %s, daily_log = %s, xp = %s WHERE discord_id = %s",
+        (new_streak, today_str, daily_log, new_xp, discord_id),
     )
     conn.commit()
     cur.close()
